@@ -1,0 +1,808 @@
+---
+title: "R code for: Barbosa et al. Health-Environment-Economy Interactions Shaping Disease Landscapes: Exploring Disease Co-occurrence in the Brazilian Amazon"
+
+author: "Milton Barbosa"
+date: '2025-01-26'
+
+output:
+  html_document: default
+  pdf_document: default
+---
+ 
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=4, fig.height=4, fig.path='Figs/',
+                      echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+
+## GLLVM (Generalized linear latent variable models). See Niku et al. 2019, https://doi.org/10.1111/2041-210X.13303)
+```{r include=FALSE}
+rm(list=ls())
+library(mvabund)
+library(TMB)
+library(gllvm)
+library(tidyverse)
+library(corrplot)
+library(gclus)
+
+# Read the matrix containing the disease cases (columns) by municipality
+y<-as.matrix(read.csv("matrix_epidemio_state_2017.csv", header=TRUE, row.names=1, check.names=FALSE, na.strings = "omit"))
+
+# Renaming the columns
+colnames(y) <- c(
+  "Chagas rural",
+  "Chagas urban",
+  "Malaria rural",
+  "Malaria urban",
+  "ATL rural",
+  "ATL urban",
+  "VL rural",
+  "VL urban",
+  "Dengue"
+)
+
+# Read the matrix containing the covariates (columns) by municipality
+X<-read.csv("matrix_environ_tt_2017.csv", header=TRUE,check.names=FALSE, na.strings = "omit")
+
+# Read the matrix containing the population (columns) by municipality
+z<-as.matrix(read.csv("matrix_pop_2017.csv", header=TRUE, row.names=1, check.names=FALSE, na.strings = "omit"))
+
+```
+
+# Check the correlation among covariates
+```{r echo=TRUE}
+# Calculate the Spearman correlation matrix for the first 25 columns of X
+cor.matrix <- cor(X[, 1:25], method = "spearman")
+
+# Round the correlation values to 3 decimal places
+cor_1 <- round(cor.matrix, 3)
+
+# Replace correlations below 0.7 with NA for easier filtering
+cor_1 <- ifelse(cor_1 < 0.7, NA, cor_1)
+
+# Display the filtered correlation matrix
+print(cor_1)
+
+# Optionally, write the filtered correlation matrix to a CSV file
+# write.csv(cor_1, "correl_variaveis.csv")
+
+```
+
+# Variable transformation
+```{r echo=TRUE}
+# Transform and scale selected variables in data frame X
+X <- X %>% mutate(
+    defor =    as.numeric(scale(log(X$defor+0.001))),
+    dgfor =    as.numeric(scale(log(X$deorg+0.0001))),
+    mining =   as.numeric(scale(log(X$mining+0.000001))),
+    fire =     as.numeric(scale(log(X$fire+0.01))),
+    core =     as.numeric(scale(log(X$core+0.1))),
+    edge =     as.numeric(scale(sqrt(X$edge+(3/8)))),
+    secveg =   as.numeric(scale(log(X$secveg+0.01))),
+    pasture =  as.numeric(scale(sqrt(X$pasture+(3/8)))),
+    crop =     as.numeric(scale(log(X$crop+0.01))),
+    urban =    as.numeric(scale(log(X$urban+0.0001))),
+    road =     as.numeric(scale(log(X$road+0.1))),
+    port =     as.numeric(scale(log(X$port+0.1))),
+    river =    as.numeric(scale(log(X$river+0.1))),
+    precp =    as.numeric(scale(log(X$precp+0.001))),
+    precn =    as.numeric(scale(log(X$precn+0.0001))),
+    tempp =    as.numeric(scale(log(X$tempp+0.01))),
+    ipm_rural= as.numeric(scale(log(X$ipm_rural+0.01))),
+    ipm_urban= as.numeric(scale(log(X$ipm_urban+0.001))))
+
+# Apply log transformation to the population matrix
+z <- log(z)
+
+
+
+# Set the plotting area to a 2x2 grid and adjust margins
+par(mfrow = c(2, 2), mar = c(2, 2, 1, 1))
+
+# Loop through the first 25 columns (or adjust for the number of columns) to create histograms
+for (i in 1:25) {  # Adjust the range (1:4) based on how many plots you want to display at a time
+  hist(X[, i], main = paste("Histogram of Column", i), xlab = "", col = "lightblue", border = "black")
+}
+
+# Plot the histogram for z
+hist(z, main = "Histogram of z", xlab = "", col = "lightgreen", border = "black")
+```
+
+
+# Selecting the model structure (family, random effect, method) based on the AIC
+```{r echo=TRUE, fig.height=9, fig.width=7}
+
+# Fit models with different families and methods
+fitp <- gllvm(y, family = "poisson")
+fitp_2 <- gllvm(y, family = "poisson", row.eff = "random")
+fitp_3 <- gllvm(y, family = "poisson", row.eff = "random", method = "LA")
+
+fitnb <- gllvm(y, family = "negative.binomial")
+fitnb_2 <- gllvm(y, family = "negative.binomial", row.eff = "random")
+fitnb_3 <- gllvm(y, family = "negative.binomial", row.eff = "random", method = "LA") 
+
+fitz <- gllvm(y, family = "ZIP", control.start = list(start.fit = fitp), method = "LA")
+fitz_2 <- gllvm(y, family = "ZIP", row.eff = "random", control.start = list(start.fit = fitp_3), method = "LA")
+
+# Compare models based on AIC
+AIC(fitp, fitp_2, fitp_3, fitnb, fitnb_2, fitnb_3, fitz, fitz_2)
+
+# Summarise the best model (assume fitnb_2 as an example here)
+summary(fitnb_2)
+
+# Inspect the selected model
+par(mfrow = c(3, 2), mar = c(4, 4, 3, 2))
+plot(fitnb_2, var.colors = 1)
+
+```
+
+# Fitting the null model with the seledcted structure
+```{r}
+fit_2<- gllvm(y, offset=z, family = "negative.binomial", method = "LA", num.lv = 2)
+
+# Plot residuals
+par(mfrow = c(3, 2), mar = c(4, 4, 3, 2))
+plot(fit_2, mfrow = c(1,2))
+
+```
+
+# Ordinations of municipalities and diseases by number of cases - Null model
+```{r echo=TRUE, fig.height=6, fig.width=6}
+
+# Extract state information (assuming the state column is the 10th column)
+states <- y[, 10] 
+
+# Convert states to a factor with specified levels
+states <- factor(states, levels = c("AC", "AM", "AP", "MA", "MT", "PA", "RO", "RR", "TO"))
+
+# Assign symbols to each state
+state_symbols <- match(states, unique(states))  # Assign unique symbols to each state
+symbol_vector <- c(1, 2, 3, 4, 5, 6, 7, 8, 9)   # Define symbol set
+
+# Define colours using the 'viridis' colour palette
+colors_plasma <- viridis::viridis(length(unique(state_symbols)))  # Generate colours
+symbol_colors <- colors_plasma[state_symbols]  # Assign colours based on states
+
+# Set up the plotting area
+par(mfrow = c(1, 1))
+
+# Ordination plot
+ordiplot(
+  fitnb_2,                   # Fitted null model
+  biplot = TRUE,             # Display biplot
+  ind.spp = 9,               # Number of species (adjust as needed)
+  alpha = 0.74,              # Transparency of points
+  main = "Ordination of Municipalities",  # Title of the plot
+  s.colors = symbol_colors,  # Colour palette for states
+  symbols = TRUE,            # Use symbols for points
+  pch = state_symbols,       # Symbols for states
+  cex.spp = 1,               # Scaling for species points
+  spp.colors = "blue"        # Colour for species points
+) + 
+abline(h = 0, v = 0, lty = 2)  # Add horizontal and vertical reference lines
+
+# Add a legend to the plot
+legend(
+  "topleft",                 # Legend position
+  legend = unique(states),   # Labels for states
+  col = colors_plasma,       # Colours for legend items
+  pch = symbol_vector,       # Symbols for legend items
+  horiz = FALSE              # Vertical orientation
+)
+```
+
+# Ordinations of municipalities coloured according to each covariate - Null model
+```{r, echo=TRUE, fig.height=6, fig.width=6}
+
+# Define an arbitrary colour palette (length 20)
+rbPal <- c("#00FA9A", "#00EC9F", "#00DFA4", "#00D2A9", "#00C5AF", "#00B8B4", 
+           "#00ABB9", "#009DBF", "#0090C4", "#0083C9", "#0076CF", "#0069D4", 
+           "#005CD9", "#004EDF", "#0041E4", "#0034E9", "#0027EF", "#001AF4", 
+           "#000DF9", "#0000FF")
+
+# Set up a plotting area for 2x2 grid
+par(mfrow = c(2, 2), mar = c(2, 2, 1, 1))
+
+# Loop through the first 25 covariates in X
+for (i in 1:ncol(X[, 1:25])) {
+  # Assign colours to municipalities based on covariate values
+  Col <- rbPal[as.numeric(cut(X[, i], breaks = 20))]
+  
+  # Ordination plot for each covariate
+  ordiplot(
+    fitnb_2,                  # Fitted null model
+    symbols = TRUE,           # Use symbols for points
+    s.colors = Col,           # Colour points based on covariate values
+    main = colnames(X)[i],    # Title of the plot (name of the covariate)
+    biplot = TRUE,            # Include biplot
+    alpha = 0.8,              # Transparency for points
+    cex.spp = 1,              # Size of species points
+    spp.colors = "red"        # Colour for species points
+  )
+}
+```
+
+# Selecting the number of latent variables for the model with covariates
+```{r, echo=TRUE, fig.height=4, fig.width=5}
+
+# Set TT-2 as the reference level
+X$ttclass <- factor(X$ttclass)
+is.factor(X$ttclass)
+X$ttclass <- relevel(X$ttclass, ref = "2")
+
+# Model with 1 latent variable
+fit_env_1_tt <- gllvm(y, X, formula = y ~ defor + dgfor + mining + fire + core + edge + secveg + pasture + crop + urban + road + port + river + precp + precn + tempp + ipm_rural + ipm_urban + ttclass, offset=z, family = "negative.binomial", row.eff = "random", num.lv = 1)
+
+# Model with 2 latent variables
+fit_env_2_tt <- gllvm(y, X, formula = y ~ defor + dgfor + mining + fire + core + edge + secveg + pasture + crop + urban + road + port + river + precp + precn + tempp + ipm_rural + ipm_urban + ttclass, offset=z, family = "negative.binomial", row.eff = "random", num.lv = 2)
+
+# Model with 3 latent variables
+fit_env_3_tt <- gllvm(y, X, formula = y ~ defor + dgfor + mining + fire + core + edge + secveg + pasture + crop + urban + road + port + river + precp + precn + tempp + ipm_rural + ipm_urban + ttclass, offset=z, family = "negative.binomial", row.eff = "random", num.lv = 3)
+
+# Compare models based on AIC
+AIC(fit_env_1_tt, fit_env_2_tt, fit_env_3_tt)
+
+# Plot residuals
+plot(fit_env_2_tt, mfrow = c(1,2))
+
+```
+
+# Model coefficients with all covariates and a standardised x-axis
+```{r, echo=TRUE, fig.height=5, fig.width=5}
+#coef(fit_env_1)
+#confint(fit_env_1)
+
+# Plotting model coefficients with confidence intervals
+coefplot(
+  fit_env_2_tt,                # Model object
+  mfrow = c(2, 2),             # Arrange plots in a 2x2 grid
+  order = FALSE,               # Do not reorder coefficients
+  cex.ylab = 0.8,              # Scale the y-axis label text
+  xlim.list = replicate(25, c(-3, 3), simplify = FALSE)  # Standardised x-axis for all plots
+)
+
+```
+# Visualising the coefficients with a levelplot
+```{r, echo=TRUE, fig.height=7, fig.width=7}
+# Load the lattice library for levelplot
+library(lattice)
+
+# Extract coefficients from the fitted model
+s <- coef(fit_env_2_tt)
+ss <- s$Xcoef  # Extract the coefficients matrix
+
+# Calculate the maximum absolute value of the coefficients for scaling
+aa <- max(abs(ss))
+
+# Define the colour palette (red to white to blue)
+colort <- colorRampPalette(c("red", "white", "blue"))
+
+# Generate the levelplot
+levelplot(
+  as.matrix(ss),                          # Convert coefficients to a matrix
+  xlab = "Diseases",                      # Label for the x-axis
+  ylab = "Socioenvironmental Variables",  # Label for the y-axis
+  col.regions = colort(100),              # Colour gradient
+  cex.lab = 1.3,                          # Size of axis labels
+  at = seq(-aa, aa, length = 100),        # Colour scale limits
+  scales = list(x = list(rot = 45))       # Rotate x-axis labels by 45 degrees
+)
+
+# Display a summary of the fitted model with correlation
+summary(fit_env_2_tt, corr = TRUE)
+
+```
+
+# Residual correlation between diseases - model without (a) and with (b) covariates
+```{r, echo=TRUE, fig.height=5, fig.width=10}
+
+# Load necessary libraries
+library(corrplot)
+library(gclus)
+
+# Residual correlation matrix for the model without covariates
+cr0 <- getResidualCor(fit_2)
+
+# Assign row and column names
+colnames(cr0) <- c(
+  "Chagas rural",
+  "Chagas urban",
+  "Malaria rural",
+  "Malaria urban",
+  "ATL rural",
+  "ATL urban",
+  "VL rural",
+  "VL urban",
+  "Dengue"
+)
+rownames(cr0) <- colnames(cr0)
+
+# Residual correlation matrix for the model with covariates
+cr <- getResidualCor(fit_env_2_tt)
+
+# Assign row and column names
+colnames(cr) <- c(
+  "Chagas rural",
+  "Chagas urban",
+  "Malaria rural",
+  "Malaria urban",
+  "ATL rural",
+  "ATL urban",
+  "VL rural",
+  "VL urban",
+  "Dengue"
+)
+rownames(cr) <- colnames(cr)
+
+# Set up the plotting area for side-by-side comparison
+par(mfrow = c(1, 2))  # 1 row, 2 columns
+
+# Plot the residual correlation matrix without covariates
+corrplot(
+  cr0[order.single(cr0), order.single(cr0)], 
+  diag = FALSE, 
+  type = "lower", 
+  order = "alphabet", 
+  addCoef.col = 'black', 
+  method = "square", 
+  tl.cex = 0.8, 
+  tl.srt = 45, 
+  tl.col = "red", 
+  main = "(a) Model Without Covariates"
+)
+
+# Plot the residual correlation matrix with covariates
+corrplot(
+  cr[order.single(cr), order.single(cr)], 
+  diag = FALSE, 
+  type = "lower", 
+  order = "alphabet", 
+  addCoef.col = 'black', 
+  method = "square", 
+  tl.cex = 0.8, 
+  tl.srt = 45, 
+  tl.col = "red", 
+  main = "(b) Model With Covariates"
+)
+
+# Optional: Save the residual correlation matrices to CSV
+# write.csv(cr0, "correl_resid_sem_cov_2017.csv")
+# write.csv(cr, "correl_resid_com_cov_2017.csv")
+
+```
+
+
+# Ordinations of municipalities and diseases by number of cases - model without (a) and with (b) covariates
+```{r, echo=TRUE,fig.height=6, fig.width=11}
+
+## Latent variables 1 and 2 – models without (a) and with (b) covariates
+par(mfrow = c(1,2))
+ordiplot(fit_2, biplot = TRUE, ind.spp = 9, alpha = 0.75, cex.spp = 1,
+  spp.colors = "red", s.colors = 8, jitter = F, which.lvs = c(1, 2),
+         main = "(a)")
+
+ordiplot(fit_env_2_tt, biplot = TRUE, ind.spp = 9, alpha = 0.75, cex.spp = 1, 
+         spp.colors = "red", s.colors = 8, jitter = F, which.lvs = c(1, 2),
+         main = "(b)")
+
+```
+
+# Ordinations of municipalities and diseases by number of cases - model with covariates
+```{r echo=TRUE, fig.height=6, fig.width=6}
+
+# Extract state information (assuming the state column is the 10th column)
+states <- y[, 10]
+
+# Convert states to a factor with specified levels
+states <- factor(states, levels = c("AC", "AM", "AP", "MA", "MT", "PA", "RO", "RR", "TO"))
+
+# Match each unique state to a corresponding symbol
+state_symbols <- match(states, unique(states))
+symbol_vector <- c(1, 2, 3, 4, 5, 6, 7, 8, 9)  # Define symbols for states
+
+# Define colors using the viridis palette
+colors_plasma <- viridis::viridis(length(unique(state_symbols)))
+symbol_colors <- colors_plasma[state_symbols]  # Assign colors based on state_symbols
+
+# Set up the plotting area
+par(mfrow = c(1, 1))
+
+# Generate the ordination plot
+ordiplot(
+  fit_env_2_tt,              # Fitted model with covariates
+  biplot = TRUE,             # Include a biplot
+  ind.spp = 9,               # Number of species or components to display
+  alpha = 0.74,              # Transparency for points
+  main = "Ordination of Municipalities",  # Plot title
+  s.colors = symbol_colors,  # Colors for state points
+  symbols = TRUE,            # Use symbols for points
+  pch = state_symbols,       # Point symbols based on states
+  cex.spp = 1,               # Size of species points
+  spp.colors = "blue"        # Color for species points
+)
+
+# Add horizontal and vertical reference lines
+abline(h = 0, v = 0, lty = 2)
+
+# Add a legend for the states
+legend(
+  "topleft",                # Position of the legend
+  legend = unique(states),  # State names for the legend
+  col = colors_plasma,      # Colors for the legend items
+  pch = symbol_vector,      # Symbols for the legend items
+  horiz = FALSE             # Vertical legend layout
+)
+
+```
+
+
+# Ordinations of municipalities coloured according to each covariate - model with covariates
+```{r eval=FALSE, fig.height=6, fig.width=6, include=FALSE}
+
+# Define a colour palette
+rbPal <- c("#00FA9A", "#00EC9F", "#00DFA4", "#00D2A9", "#00C5AF", "#00B8B4", 
+           "#00ABB9", "#009DBF", "#0090C4", "#0083C9", "#0076CF", "#0069D4", 
+           "#005CD9", "#004EDF", "#0041E4", "#0034E9", "#0027EF", "#001AF4", 
+           "#000DF9", "#0000FF")
+
+# Set up plotting area
+par(mfrow = c(2, 2), mar = c(2, 2, 1, 1))
+
+# Loop through each covariate in X
+for (i in 1:ncol(X)) {
+  # Assign colours based on covariate values
+  Col <- rbPal[as.numeric(cut(X[, i], breaks = 20))]
+  
+  # Generate ordination plot
+  ordiplot(
+    fit_env_2,                   # Fitted model with covariates
+    symbols = TRUE,              # Use symbols for points
+    s.colors = Col,              # Colour points based on covariate values
+    main = colnames(X)[i],       # Title of the plot (covariate name)
+    biplot = TRUE,               # Include biplot
+    alpha = 0.7,                 # Transparency for points
+    cex.spp = 0.8,               # Size of species points
+    which.lvs = c(1, 2),         # Latent variables to include in the plot
+    spp.colors = "red"           # Colour for species points
+  )
+}
+
+```
+
+# Comparison of disease residual covariances between models with and without covariates and calculation of the proportion of residual covariance explained by the model with covariates.
+```{r, echo=TRUE}
+# Comparison of disease residual covariances between models with and without covariates
+
+# Extract residual covariance matrices
+rcov0 <- getResidualCov(fit_2, adjust = 0)             # Null model
+rcov <- getResidualCov(fit_env_2_tt, adjust = 0)       # Model with covariates
+
+# Display trace of the residual covariance matrices
+rcov0$trace  # Total variance explained by the null model
+rcov$trace   # Total variance explained by the model with covariates
+
+# Calculate the proportion of residual covariance explained by the model with covariates
+proportion_explained <- (1 - rcov$trace) / rcov0$trace
+proportion_explained
+```
+
+# Extract model residuals per disease per municipality
+```{r, echo=TRUE}
+
+# Residuals for the null model
+res0 <- residuals(fit_2, type = "response")
+res0 <- as.data.frame(res0$residuals)
+
+# Convert residuals to yearly incidence per 1000 inhabitants (null model)
+resid_incidence_null <- as.matrix(((res0 / 5) / z) * 1000)
+
+# Residuals for the model with covariates
+res <- residuals(fit_env_2_tt, type = "response")
+res <- as.data.frame(res$residuals)
+
+# Convert residuals to yearly incidence per 1000 inhabitants (model with covariates)
+resid_incidence <- as.matrix(((res / 5) / z) * 1000)
+
+# Optional: Save residual incidence matrices to CSV
+# write.csv(resid_incidence_null, "resid_model_null_2017_tt.csv", row.names = TRUE)
+# write.csv(resid_incidence, "resid_model_with_covar_2017_tt.csv", row.names = TRUE)
+
+```
+
+# Calculate the observed and predicted incidence per years per 1000 inhabitants
+```{r, echo=TRUE, fig.height=10, fig.width=10}
+# Load necessary libraries
+library(ggplot2)
+library(patchwork)  # For combining plots
+
+# Extract the linear predictor from the fitted model
+pred <- as.data.frame(predict(fit_env_2_tt, type = "response"))
+
+# Calculate observed incidence rates (cases per year per 1000 inhabitants). Divide the total cases over 5 years, then divide by the number of inhabitants of each municipality (matrix z), and multiply by 1000 to obtain the yearly incidence per 1000 inhabitants
+obs_incid <- as.matrix(((y / 5) / z) * 1000) 
+
+# write.csv(obs_incid, "incidencia_2017_year_1000_inhabit.csv", row.names = TRUE)
+
+# Calculate predicted incidence rates (cases per year per 1000 inhabitants)
+pred_incid <- as.matrix(((pred / 5) / z) * 1000)
+
+# write.csv(pred_incid, "predito_2017_year_1000_inhabit_ss.csv", row.names = TRUE)
+
+# Get the disease names from the column names of y
+disease_names <- colnames(y)
+
+# Initialize a list to store all the plots
+plot_list <- list()
+
+# Loop through all diseases and create plots
+for (i in seq_along(disease_names)) {
+  
+  # Disease name
+  disease <- disease_names[i]
+  
+  # Create a data frame for plotting
+  plot_data <- data.frame(
+    Municipality = 1:nrow(obs_incid),
+    Observed = obs_incid[, i],
+    Predicted = pred_incid[, i]
+  )
+  
+  # Create the plot (remove individual x/y axis labels!)
+  p <- ggplot(plot_data, aes(x = Observed, y = Predicted)) +
+    geom_point(alpha = 0.5, color = "#2C3E50", size = 2) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", 
+                color = "#E74C3C", size = 1) +
+    labs(
+      title = paste(disease),
+      x = NULL,          # <-- Remove individual x-axis label
+      y = NULL           # <-- Remove individual y-axis label
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      panel.grid.minor = element_blank()
+    )
+  
+  # Add the plot to the list
+  plot_list[[i]] <- p
+}
+
+# Combine all the plots into a grid layout
+combined_plot <- wrap_plots(plot_list) + 
+  plot_annotation(
+    title = "Observed vs. Predicted Incidence Rates (per 1000 inhabitants)",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold")
+    )
+  )
+
+# Now override the axis labels once at the "global" level
+combined_plot <- combined_plot & 
+  labs(x = "Observed", y = "Predicted")
+
+# Print the combined plot
+print(combined_plot)
+
+# Save the combined plot
+# ggsave("obs_vs_pred.png", combined_plot, 
+#        width = 10, height = 10, units = "in", dpi = 300)
+```
+
+# Plotting coeficients as networks of diseases and covariates
+```{r}
+library(SemiPar)
+library(Hmisc)
+library(qgraph)
+
+# Load a square matrix with all diseases and covariates as rows and columns. Fill the complete matrix with values from the model coefficients, with disease-disease and covariate-covariate cells filled with zeros. 
+Q <- as.matrix(read.csv("coefficients_matrix.csv", header = TRUE, row.names = 1))
+
+# View the complete matrix
+print(Q)
+
+# excluding negative values to create the positive associations network
+Q <- as.matrix(ifelse(Q>-0.2, 0, Q))
+
+# excluding positive values to create the negative associations network
+# Q <- as.matrix(ifelse(Q<0.2, 0, Q))
+
+# Exclude rows with only zeros
+Q <- Q[rowSums(Q != 0) > 0, ]
+
+# Exclude columns with only zeros
+Q <- Q[, colSums(Q != 0) > 0]
+
+
+# Malaria-Chagas Negative
+# {
+#   node_names <- c("Rural Chagas", "Urban Chagas", "Rural malaria", "Urban malaria", "Forest degradation (2007-2017)",
+#                   "Fire", "Forest edge", "Secondary vegetation", "Pasture", "Agriculture", "Urbanisation", "Roads",
+#                   "Positive precipitation anomaly", "Negative precipitation anomaly","positive min. temp. anomaly",
+#                   "Urban porverty", "TT class 1", "TT class 3", "TT class 4", "TT class 5",
+#                   "TT class 7")
+#   
+#   disease <- c(rep(c("Chagas",
+#                      "Malaria"),
+#                    each=2),
+#                rep(" Covariates",
+#                    each=17))
+#   } 
+
+# Malaria-Chagas Positive
+
+# Define node names and grouping
+{ node_names <- c("Rural malaria", "Urban malaria","Rural ATL", "Urban ATL", "Rural VL", "Urban VL", 
+                  "Deforestation", "Forest core", "Forest edge", "Secondary veg.",
+                  "Pasture", "Agriculture", "Urbanisation", "- precip. anomaly",
+                  "Urban poverty", "TT1", "TT3", "TT4",  
+                  "TT5",  "TT7")
+  
+disease <- c(rep(c("Malaria", "ATL", "VL"),
+                   each=2),
+               rep("Covariates",
+                   each=14))
+
+node_labels <- c("Rural \nmalaria", "Urban \nmalaria","Rural \nATL", "Urban \nATL", "Rural \nVL", "Urban \nVL", 
+                 "Deforestation", "Forest core", "Forest edge", "Secondary \nvegetation",
+                 "Pasture", "Agriculture", "Urbanisation", "(-) precip. \nanomaly",
+                 "Urban \npoverty", "TT1", "TT3", "TT4",  
+                 "TT5",  "TT7")
+
+
+node_types <- ifelse(disease %in% c("Malaria", "ATL", "VL"), "circle", "rectangle")
+node_sizes <- ifelse(disease %in% c("Malaria", "ATL", "VL"), 8, 11)
+
+# Reorder node_names and disease vectors
+legend_order <- c("Rural malaria", "Urban malaria","Rural ATL", "Urban ATL", "Rural VL", "Urban VL", 
+                  "Deforestation", "Forest core", "Forest edge", "Secondary veg.",
+                  "Pasture", "Agriculture", "Urbanisation", "- precip. anomaly",
+                  "Urban poverty", "TT1", "TT3", "TT4",  
+                  "TT5",  "TT7")
+
+node_names <- node_names[match(legend_order, node_names)]
+disease <- disease[match(legend_order, node_names)]
+
+# Node aesthetics
+border_colors <- c("NA", "NA", "NA", "NA",
+                   "NA", "NA", "NA", "NA",
+                   "NA", "NA", "NA", "NA", 
+                   "NA", "NA", "NA", "NA", 
+                   "NA", "NA", "NA", "NA"
+                   )
+
+border_width <- c(0.2, 0.2, 0.2, 0.2,  
+                  0.2, 0.2, 0.2, 0.2,
+                  0.2, 0.8, 0.2, 0.8,
+                  0.2, 0.2, 0.2, 0.2,
+                  0.8, 0.2, 0.8, 0.2 
+                  )
+
+label_color <- c("black", "black", "black", "black",
+                 "black", "black", "#808080", "#808080",
+                 "#808080", "red4","#808080", "red4", 
+                 "#808080", "#808080", "#808080", "#808080", 
+                 "red4", "#808080", "red4","#808080"
+)
+
+node_color <- c("darkgreen","darkgreen", "orange","orange",
+                "darkblue", "darkblue", "lightgrey", "lightgrey",
+                "lightgrey", "lightgrey", "lightgrey","lightgrey",
+                "lightgrey","lightgrey","lightgrey","lightgrey",
+                "lightgrey","lightgrey","lightgrey","lightgrey"
+)
+# Create the network plot
+network <- 
+  qgraph(
+    input = Q,
+    
+    #' *Important additional arguments* (p. 29)
+    
+    layout = 'spring', # 'circle', 'groups', 'spring'
+    groups = disease, # list or vector
+    minimum = 0.25, # min value to be plotted
+    #maximum = 0, #max value to scale edge widths, default is absmax pcor(x,y)
+    cut = 0.25, # value to initiate the scaling of edge widths
+    # palette = "pastel", # 'rainbow', 'pastel', 'gray', 'R', 'ggplot2', 'colorblind'
+    theme = 'Fried', # 'classic', 'gray', 'Hollywood', 'Borkulo', 'gimme',
+    # 'TeamFortress', 'Reddit', 'Leuven', 'Fried', 'colorblind'
+    # color = node_colors,
+    color = node_color,
+    edge.color = "darkgrey",
+    # details = T, # if T, min/max/cut is printed under the graph
+    normalize = T, # graph's normalized to look the same for all sizes
+    vTrans = 125, # transparency of nodes, between 0 and 255 (no transparency)
+   
+    #' *Additional options for correlation/covariance matrices* (p. 30)
+    
+   #graph = 'glasso', # 'cor', 'pcor', 'glasso'
+  # sampleSize = nrow(Q), # sample size, when graph="glasso" or minimum="sig"
+    
+    #' *Output arguments* (pp. 30-31)
+    width = 9 * 1, # width of figure
+    height = 7, # height of figure
+    
+    #' *Graphical arguments*
+    
+    # Nodes (pp. 31-32)
+    
+    # indicates node size, can be a vector with size for each node
+    # default =  8*exp(-nNodes/80)+1
+    border.width = border_width, # controls width of the border
+    border.color = border_colors,  # Set the border colors for each node
+    # vsize = c(5,5,5,5),
+    vsize = node_sizes,
+    vsize2 = 5,
+    shape = node_types,
+  
+    # repulsion = 0.99,
+    title = "(b)",
+  
+    # Node labels (pp. 32-33)
+    # labels = names(Q), # should labels be plotted?
+    labels = node_labels,  # Specify the updated node labels
+    label.cex = 1, # scalar on label size
+    label.color = label_color, # string on label colors
+    label.prop = 1.1, # proportion of the width of the node that the label scales
+    # label.norm = "OOO", # normalize width of label size in nodes
+    label.scale = T, # should labels be scaled to fit the node?
+    label.scale.equal = T, # should labels have same font size?
+    label.fill.vertical = 0.85, # scalar indicating max prop to fill a node
+    label.fill.horizontal = 0.85, # scalar indicating max prop to fill a node
+    # node.label.offset = c(0.5,0.5), # where should label be centered, (x, y)
+    # node.label.position = NULL, # set specific positions of node labels
+    
+  
+    # Edges (pp. 33-34)
+    negDashed = F, # should negative edges be dashed?
+    trans = T, # should edges fade to white?
+    fade = F, # should edges fade?
+    lty = 1, # line type, see 'par'
+
+    # Edge curvature (pp. 34-35)
+    # curve = NA, # single value, a vector list, weight matrix or NA (default)
+    curveAll = T, # logical indicating if all edges should be curved
+    curveDefault = 0.5, # default is 1
+  
+     # Edge labels (p. 35)
+    edge.labels = T, # if T, numeric is plotted. if F, nothing is.
+    edge.label.cex = 0.9, # single number or number per edge
+    edge.label.bg = T, # plot a white background behind number
+    edge.label.margin = 0, # margin of the background bow around the edge label
+    edge.label.position = 0.6, # vector between 0 and 1, 0.5 is middle
+  
+  # Layout (p. 35)
+    repulsion = 0.7, # setting to lower values will cause nodes to repulse each  other less.This is useful if few unconnected nodes cause the giant
+  # component to visually be clustered too much in the same place.
+    
+    # # Generical graphical arguments (p. 36)
+    font = 1, # integer specifying default font for node and edge labels
+    
+    # Legend (p. 35-36)
+    legend = F, # should a legend be plotted?
+    legend.cex = 0.27, # scalar of the legend
+    legend.mode = 'style1', # default is 'style1', different way to show legend
+    GLratio = 2.5, # relative size of graph compared to the layout
+    layoutScale = c(1, 1), # vector with a scalar for respectively the x and y
+    # coordinates of the layout. Setting this to c(2, 2) makes plot twice as
+    # big. This can be used with layoutOffset to determine the graph's placement.
+    layoutOffset = c(0,0), # vector with the offset to the x and coordinates of 
+    # the center of the graph
+    nodeNames = node_names, # names for each node to plot in legend
+    
+    # Background (p. 36)
+    bg = F, # should node colors cast a light in the background?
+    # can also be a color...
+    bgcontrol = 6, # the higher, the less light each node gives if bg = T
+    bgres = 100, # (default) square root of the number of pixels used in bg = T  
+
+    # Arguments for directed graphs (p. 36)
+    directed = F, # are edges directed? can be logical vector/matrix
+    arrows = T, # should arrows be plotted? can be a number
+    arrowAngle = pi/8, # (default for unweighted) and pi/4 for weighted
+    #' *azise* = ..., size of the arrowhead
+    open = F, # should arrowheads be open?
+    bidirectional = F # should directional edges between nodes have two edges?
+  )
+}
+
+```
